@@ -22,6 +22,7 @@ x-kafka-env: &kafka-env
   KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
   KAFKA_JMX_PORT: 9999
   KAFKA_HEAP_OPTS: -Xms512m -Xmx512m
+  KAFKA_LOG_DIRS: /var/lib/kafka/data
 
 x-kafka-healthcheck: &kafka-healthcheck
   # Проверка поднимает JVM-клиент; реже, чтобы не конкурировать с прогоном.
@@ -41,6 +42,8 @@ services:
       KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka1:9092
       KAFKA_JMX_HOSTNAME: kafka1
+    volumes:
+      - kafka1-data:/var/lib/kafka/data
     healthcheck:
       <<: *kafka-healthcheck
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server kafka1:9092 > /dev/null 2>&1"]
@@ -55,6 +58,8 @@ services:
       KAFKA_LISTENERS: PLAINTEXT://:9094,CONTROLLER://:9095
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka2:9094
       KAFKA_JMX_HOSTNAME: kafka2
+    volumes:
+      - kafka2-data:/var/lib/kafka/data
     healthcheck:
       <<: *kafka-healthcheck
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server kafka2:9094 > /dev/null 2>&1"]
@@ -69,6 +74,8 @@ services:
       KAFKA_LISTENERS: PLAINTEXT://:9096,CONTROLLER://:9097
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka3:9096
       KAFKA_JMX_HOSTNAME: kafka3
+    volumes:
+      - kafka3-data:/var/lib/kafka/data
     healthcheck:
       <<: *kafka-healthcheck
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server kafka3:9096 > /dev/null 2>&1"]
@@ -105,8 +112,23 @@ services:
       KAFKA_TOPIC: ${KAFKA_TOPIC:-load-test}
       CONSUMER_GROUPS: group-1,group-2,group-3
       METRICS_PORT: 8002
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
     ports:
       - "8002:8002"
+    restart: unless-stopped
+    stop_grace_period: 20s
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/metrics', timeout=5)",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
   # Продюсер стартует вместе со стендом, но отправку запускает только POST /runs.
   producer:
@@ -124,11 +146,26 @@ services:
       PRODUCER_QUEUE_BUFFERING_MAX_MESSAGES: ${PRODUCER_QUEUE_BUFFERING_MAX_MESSAGES:-200000}
       PRODUCER_ACKS: ${PRODUCER_ACKS:-1}
       PRODUCER_ENABLE_IDEMPOTENCE: ${PRODUCER_ENABLE_IDEMPOTENCE:-false}
+      PRODUCER_FLUSH_TIMEOUT_S: ${PRODUCER_FLUSH_TIMEOUT_S:-30}
+      PRODUCER_MESSAGE_TIMEOUT_MS: ${PRODUCER_MESSAGE_TIMEOUT_MS:-60000}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
     ports:
       - "8001:8001"
     restart: unless-stopped
     # Время на flush() при остановке во время прогона (PRODUCER_FLUSH_TIMEOUT_S = 30 с).
     stop_grace_period: 90s
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=5)",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
   kafka-ui:
     image: kafbat/kafka-ui:v1.3.0
@@ -200,19 +237,25 @@ services:
     ports:
       - "9090:9090"
     depends_on:
-      - jmx-exporter-1
-      - jmx-exporter-2
-      - jmx-exporter-3
-      - kafka-exporter
-      - producer
-      - consumer
+      jmx-exporter-1: { condition: service_started }
+      jmx-exporter-2: { condition: service_started }
+      jmx-exporter-3: { condition: service_started }
+      kafka-exporter: { condition: service_started }
+      producer: { condition: service_healthy }
+      consumer: { condition: service_healthy }
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/-/ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
   grafana:
     image: grafana/grafana:11.5.2
     environment:
-      GF_SECURITY_ADMIN_USER: admin
-      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
@@ -222,9 +265,18 @@ services:
     ports:
       - "3000:3000"
     depends_on:
-      - prometheus
+      prometheus: { condition: service_healthy }
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
 volumes:
+  kafka1-data:
+  kafka2-data:
+  kafka3-data:
   prometheus:
   grafana:

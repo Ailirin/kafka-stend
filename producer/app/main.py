@@ -20,7 +20,14 @@ def configure_logging(level: str) -> None:
 def main() -> None:
     settings = Settings.from_env()
     configure_logging(settings.log_level)
-    logger.info("Kafka config: %s", settings.kafka_config())
+    logger.info(
+        "Producer started topic=%s acks=%s enable.idempotence=%s linger.ms=%s port=%s",
+        settings.topic,
+        settings.acks,
+        settings.enable_idempotence,
+        settings.linger_ms,
+        settings.http_port,
+    )
 
     # Один процесс без workers: состояние прогона хранится в памяти RunManager.
     # SIGINT/SIGTERM обрабатывает uvicorn, остановка прогона — в lifespan приложения.

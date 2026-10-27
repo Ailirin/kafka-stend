@@ -1,8 +1,10 @@
 # Нагрузочный стенд Kafka
 
-Локальный стенд для прогонов Apache Kafka 4.1.0 (KRaft): продюсер и три consumer group на `confluent-kafka` 2.16.0, метрики в Prometheus и Grafana.
+Воспроизводимые прогоны Apache Kafka 4.1.0 (KRaft) на одной машине: кластер из трёх узлов с ролями broker+controller, продюсер и три независимые consumer group на `confluent-kafka` 2.16.0, снятие метрик в Prometheus и Grafana.
 
-Стенд не для production: без TLS/SASL/ACL, короткие текстовые сообщения, один процесс продюсера.
+Прогон стартует по `POST /runs`, параметры — переменными окружения. Критерий успеха: `delivered == total_messages`, `failed == 0`, `not_flushed == 0`, лаг трёх групп после догонки — 0. Один изменяемый параметр за прогон, результат — строка в таблице экспериментов.
+
+Брокеры ограничены по CPU и памяти, чтобы цифры отражали железо стенда, а не «сколько влезло в ноут без лимитов».
 
 ## Состав
 
@@ -10,13 +12,13 @@
 | --- | --- | --- |
 | kafka1 / kafka2 / kafka3 | Кластер, 3 брокера, роли broker+controller | внутри Docker |
 | kafka-init | Создаёт топик `load-test` (6 партиций, RF=3) и завершается | — |
-| producer | HTTP API, отправка по команде | http://localhost:8001/docs |
+| producer | HTTP API, отправка по команде | http://localhost:8001/docs, liveness `/health` |
 | consumer | Три группы в одном процессе (`group-1` … `group-3`) | http://localhost:8002/metrics |
 | kafka-ui | Топики, партиции, consumer groups | http://localhost:8080 |
 | jmx-exporter-1/2/3 | JMX брокера, sidecar в сети `kafkaN` | scrape `kafkaN:7071` |
 | kafka-exporter | Лаг consumer groups | http://localhost:9308/metrics |
 | prometheus | Хранение метрик 7 дней | http://localhost:9090 |
-| grafana | Графики, datasource Prometheus уже прописан | http://localhost:3000 (`admin` / `admin`) |
+| grafana | Графики, datasource Prometheus уже прописан | http://localhost:3000 (пароль: `GRAFANA_ADMIN_PASSWORD`, дефолт `admin`) |
 
 Порты брокеров наружу не проброшены: advertised-адреса — Docker-имена `kafka1:9092`, `kafka2:9094`, `kafka3:9096`. Клиенты работают только внутри сети Compose.
 
@@ -33,9 +35,9 @@ docker compose ps
 
 Ожидаемое состояние:
 
-- `kafka1`–`kafka3` — `healthy`
+- `kafka1`–`kafka3`, `producer`, `consumer` — `healthy`
 - `kafka-init` — `Exited (0)`
-- `producer`, `consumer`, `kafka-ui`, `jmx-exporter-1`–`3`, `kafka-exporter`, `prometheus`, `grafana` — `Up`
+- `kafka-ui`, `jmx-exporter-1`–`3`, `kafka-exporter`, `prometheus`, `grafana` — `Up`
 
 Топик создаётся автоматически. Проверка:
 
@@ -58,7 +60,7 @@ docker compose exec kafka1 /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-s
 
 По умолчанию прогон — 100 000 сообщений, `acks=1`, `enable.idempotence=false`.
 
-На время отправки UI можно остановить, чтобы разгрузить ноут:
+На время отправки UI можно остановить, чтобы не конкурировать с брокерами за CPU:
 
 ```powershell
 docker compose stop kafka-ui grafana
@@ -69,7 +71,7 @@ docker compose start kafka-ui grafana
 
 Повторный `POST /runs`, пока идёт отправка, вернёт `409 Conflict`. Параметры прогона (число сообщений, `linger.ms`, `acks` и т. д.) задаются переменными окружения, не телом запроса. В контейнер попадают только те, что прописаны в `docker-compose.yml`.
 
-На одной машине в Docker Desktop фактическая скорость обычно ниже ориентира 100 000 msg/sec — это фиксируется в таблице экспериментов.
+Ориентир пропускной способности — порядка 100 000 msg/sec. Факт на этом железе ниже; его фиксируют в таблице, а не подгоняют конфигом.
 
 После прогона процесс не завершается: `/metrics` и `GET /runs/current` остаются доступны.
 
@@ -91,14 +93,15 @@ docker compose start kafka-ui grafana
 docker compose up -d --force-recreate producer
 ```
 
-Чистый повторный прогон (иначе сообщения копятся в том же топике, а счётчики консьюмеров продолжают расти):
+Чистый повторный прогон (иначе сообщения копятся в том же топике). Тома брокеров переживают обычный `down`, поэтому сбрасывают только данные Kafka:
 
 ```powershell
 docker compose down
+docker volume rm kafka-stend_kafka1-data kafka-stend_kafka2-data kafka-stend_kafka3-data
 docker compose up -d
 ```
 
-`docker compose down` стирает топик и офсеты брокеров. История Prometheus и дашборды Grafana лежат в томах и остаются. Тома удаляются только с `docker compose down -v`.
+История Prometheus и дашборды Grafana при этом остаются. Полный сброс всех томов: `docker compose down -v`.
 
 ## Grafana
 
@@ -183,6 +186,7 @@ Invoke-RestMethod -Method Post http://localhost:8001/runs
 ```powershell
 $env:TOPIC_PARTITIONS = "12"
 docker compose down
+docker volume rm kafka-stend_kafka1-data kafka-stend_kafka2-data kafka-stend_kafka3-data
 docker compose up -d
 ```
 
@@ -195,7 +199,10 @@ docker compose up -d
 | `PRODUCER_ACKS` | `1` | `1` или `all` |
 | `PRODUCER_ENABLE_IDEMPOTENCE` | `false` | идемпотентный продюсер; вместе с ним нужен `acks=all` |
 | `PRODUCER_QUEUE_BUFFERING_MAX_MESSAGES` | `200000` | локальная очередь librdkafka |
-| `TOPIC_PARTITIONS` | `6` | партиции топика (нужен `compose down`) |
+| `PRODUCER_FLUSH_TIMEOUT_S` | `30` | таймаут финального flush |
+| `PRODUCER_MESSAGE_TIMEOUT_MS` | `60000` | сколько сообщение может ждать доставки |
+| `TOPIC_PARTITIONS` | `6` | партиции топика (нужен сброс томов брокеров) |
+| `GRAFANA_ADMIN_PASSWORD` | `admin` | пароль входа в Grafana |
 
 | № | Изменение | MessagesInPerSec | p99 latency | consumer lag | Замечания |
 | --- | --- | --- | --- | --- | --- |
@@ -209,7 +216,14 @@ docker compose up -d
 | 8 | `compression.type` snappy → lz4 | 26 300 | 0,49 с | 0 (пик 156 000) | 3,8 с, delivered 100 000 |
 | 9 | `compression.type` snappy → none | 21 300 | 0,25 с | 0 (пик 177 000) | 4,7 с, delivered 100 000 |
 
-Throughput и latency в обратной зависимости: крупнее батч — выше скорость, дольше сообщение сидит в буфере. Ослабление `acks` / идемпотентности нельзя читать как характеристику production-конфигурации.
+Крупнее батч — выше скорость и длиннее задержка в буфере. `acks=all` и идемпотентность на одной VM не показывают цену репликации по сети; для выводов про географически разнесённый кластер этого стенда недостаточно.
+
+## Границы стенда
+
+- Слушатели PLAINTEXT, без TLS, SASL и ACL: брокеры не опубликованы на хост, клиенты только в сети Compose. Для публичного контура этого недостаточно.
+- Полезная нагрузка — короткие текстовые сообщения, один процесс продюсера.
+- Логи брокеров, Prometheus и Grafana — в именованных томах. `docker compose down` контейнеры останавливает, данные оставляет.
+- Стенд для измерений и регрессии настроек продюсера на изолированной сети Docker.
 
 ## Остановка
 
@@ -217,7 +231,7 @@ Throughput и latency в обратной зависимости: крупнее
 docker compose down
 ```
 
-История метрик и дашборд Grafana сохраняются. Чтобы удалить и их:
+Тома (Kafka, Prometheus, Grafana) сохраняются. Чтобы удалить и их:
 
 ```powershell
 docker compose down -v

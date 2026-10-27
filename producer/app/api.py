@@ -59,6 +59,14 @@ def create_app(settings: Settings) -> FastAPI:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No runs yet")
         return RunResponse.model_validate(snapshot)
 
+    @app.get("/health", include_in_schema=False)
+    def health() -> dict[str, str]:
+        return {"status": "ok"}
+
+    @app.get("/ready", include_in_schema=False)
+    def ready() -> dict[str, str]:
+        return {"status": "ok"}
+
     @app.get("/metrics", include_in_schema=False)
     def metrics() -> Response:
         return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
