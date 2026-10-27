@@ -1,0 +1,38 @@
+hostPort: localhost:9999
+lowercaseOutputName: true
+lowercaseOutputLabelNames: true
+whitelistObjectNames:
+  - kafka.server:type=BrokerTopicMetrics,*
+  - kafka.network:type=RequestMetrics,*
+  - kafka.server:type=ReplicaManager,*
+  - java.lang:type=OperatingSystem,*
+  - java.lang:type=Memory,*
+  - java.lang:type=GarbageCollector,*
+rules:
+  - pattern: kafka.server<type=BrokerTopicMetrics, name=(.+), topic=(.+)><>(Count|OneMinuteRate)
+    name: kafka_server_brokertopicmetrics_$1_$3
+    type: GAUGE
+    labels:
+      topic: "$2"
+  - pattern: kafka.server<type=BrokerTopicMetrics, name=(.+)><>(Count|OneMinuteRate)
+    name: kafka_server_brokertopicmetrics_$1_$2
+    type: GAUGE
+  - pattern: kafka.network<type=RequestMetrics, name=(.+), request=(.+)><>(Count|Mean|OneMinuteRate|99thPercentile)
+    name: kafka_network_requestmetrics_$1_$3
+    type: GAUGE
+    labels:
+      request: "$2"
+  - pattern: kafka.server<type=ReplicaManager, name=(.+)><>(Value|OneMinuteRate)
+    name: kafka_server_replicamanager_$1
+    type: GAUGE
+  - pattern: java.lang<type=OperatingSystem><>(ProcessCpuLoad|SystemCpuLoad|SystemLoadAverage|AvailableProcessors)
+    name: jmx_operatingsystem_$1
+    type: GAUGE
+  - pattern: java.lang<name=(.+), type=GarbageCollector><>(CollectionCount|CollectionTime)
+    name: jmx_gc_$2
+    type: GAUGE
+    labels:
+      gc: "$1"
+  - pattern: java.lang<type=Memory><HeapMemoryUsage>(used|committed|max)
+    name: jmx_memory_heap_$1
+    type: GAUGE

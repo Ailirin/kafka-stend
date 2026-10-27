@@ -1,0 +1,28 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  # Sidecar JMX Exporter делит сеть с брокером (network_mode: service:kafkaN),
+  # поэтому scrape идёт на hostname брокера, порт 7071.
+  # Сбор JMX по трём брокерам дольше 10 с — дефолтный scrape_timeout не успевает.
+  - job_name: kafka-jmx
+    scrape_interval: 30s
+    scrape_timeout: 25s
+    static_configs:
+      - targets:
+          - kafka1:7071
+          - kafka2:7071
+          - kafka3:7071
+
+  - job_name: kafka-exporter
+    static_configs:
+      - targets: [kafka-exporter:9308]
+
+  - job_name: producer
+    static_configs:
+      - targets: [producer:8001]
+
+  - job_name: consumer
+    static_configs:
+      - targets: [consumer:8002]
