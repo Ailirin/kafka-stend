@@ -25,4 +25,7 @@ scrape_configs:
 
   - job_name: consumer
     static_configs:
-      - targets: [consumer:8002]
+      - targets:
+          - consumer-1:8082
+          - consumer-2:8082
+          - consumer-3:8082

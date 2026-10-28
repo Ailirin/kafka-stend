@@ -1,5 +1,9 @@
 name: kafka-stend
 
+# Бюджет ~4 ядра Docker Desktop (не 2.0 на брокера: 3×2=6 ядер).
+# Брокеры 3×1.0, продюсер 0.5, консьюмеры 3×0.25, мониторинг мельче.
+# Нужен docker compose v2, иначе deploy.resources может не примениться.
+
 x-kafka-image: &kafka-image apache/kafka:4.1.0
 
 x-kafka-common: &kafka-common
@@ -7,14 +11,21 @@ x-kafka-common: &kafka-common
   restart: unless-stopped
   # 768m > heap 512m: запас на metaspace, direct memory и OS внутри контейнера.
   mem_limit: 768m
+  cpu_shares: 4096
+  cpus: 1.0
+  deploy:
+    resources:
+      limits:
+        cpus: "1.0"
+        memory: 768M
 
 x-kafka-env: &kafka-env
   CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
   KAFKA_PROCESS_ROLES: broker,controller
-  KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka1:9093,2@kafka2:9095,3@kafka3:9097
+  KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka1:9093,2@kafka2:9093,3@kafka3:9093
   KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
-  KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
-  KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+  KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+  KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
   KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
   KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
   KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
@@ -31,54 +42,83 @@ x-kafka-healthcheck: &kafka-healthcheck
   retries: 5
   start_period: 60s
 
+# Три члена одной group: 6 партиций делятся между репликами.
+x-consumer-common: &consumer-common
+  build: ./consumer
+  depends_on:
+    kafka-init: { condition: service_completed_successfully }
+  environment:
+    KAFKA_BOOTSTRAP_SERVERS: kafka1:19092,kafka2:19092,kafka3:19092
+    KAFKA_TOPIC: ${KAFKA_TOPIC:-load-test}
+    CONSUMER_GROUP_ID: ${CONSUMER_GROUP_ID:-load-test-group}
+    METRICS_PORT: 8082
+    LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  restart: unless-stopped
+  stop_grace_period: 20s
+  cpu_shares: 1024
+  cpus: 0.25
+  deploy:
+    resources:
+      limits:
+        cpus: "0.25"
+  healthcheck:
+    test:
+      [
+        "CMD",
+        "python",
+        "-c",
+        "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8082/metrics', timeout=5)",
+      ]
+    interval: 30s
+    timeout: 5s
+    retries: 3
+    start_period: 20s
+
 services:
   kafka1:
     <<: *kafka-common
     hostname: kafka1
-    cpuset: "0"
     environment:
       <<: *kafka-env
       KAFKA_NODE_ID: 1
-      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka1:9092
+      KAFKA_LISTENERS: INTERNAL://:19092,EXTERNAL://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka1:19092,EXTERNAL://localhost:9092
       KAFKA_JMX_HOSTNAME: kafka1
     volumes:
       - kafka1-data:/var/lib/kafka/data
     healthcheck:
       <<: *kafka-healthcheck
-      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server kafka1:9092 > /dev/null 2>&1"]
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server kafka1:19092 > /dev/null 2>&1"]
 
   kafka2:
     <<: *kafka-common
     hostname: kafka2
-    cpuset: "1"
     environment:
       <<: *kafka-env
       KAFKA_NODE_ID: 2
-      KAFKA_LISTENERS: PLAINTEXT://:9094,CONTROLLER://:9095
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka2:9094
+      KAFKA_LISTENERS: INTERNAL://:19092,EXTERNAL://:9094,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka2:19092,EXTERNAL://localhost:9094
       KAFKA_JMX_HOSTNAME: kafka2
     volumes:
       - kafka2-data:/var/lib/kafka/data
     healthcheck:
       <<: *kafka-healthcheck
-      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server kafka2:9094 > /dev/null 2>&1"]
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server kafka2:19092 > /dev/null 2>&1"]
 
   kafka3:
     <<: *kafka-common
     hostname: kafka3
-    cpuset: "2"
     environment:
       <<: *kafka-env
       KAFKA_NODE_ID: 3
-      KAFKA_LISTENERS: PLAINTEXT://:9096,CONTROLLER://:9097
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka3:9096
+      KAFKA_LISTENERS: INTERNAL://:19092,EXTERNAL://:9096,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka3:19092,EXTERNAL://localhost:9096
       KAFKA_JMX_HOSTNAME: kafka3
     volumes:
       - kafka3-data:/var/lib/kafka/data
     healthcheck:
       <<: *kafka-healthcheck
-      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server kafka3:9096 > /dev/null 2>&1"]
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server kafka3:19092 > /dev/null 2>&1"]
 
   # Одноразовый сервис: создаёт топик и завершается с кодом 0.
   # Клиенты стартуют только после него (service_completed_successfully).
@@ -93,50 +133,47 @@ services:
       - |
         set -euo pipefail
         /opt/kafka/bin/kafka-topics.sh \
-          --bootstrap-server kafka1:9092,kafka2:9094,kafka3:9096 \
+          --bootstrap-server kafka1:19092,kafka2:19092,kafka3:19092 \
           --create --if-not-exists \
           --topic "${KAFKA_TOPIC:-load-test}" \
           --partitions "${TOPIC_PARTITIONS:-6}" \
           --replication-factor 3
         /opt/kafka/bin/kafka-topics.sh \
-          --bootstrap-server kafka1:9092 \
+          --bootstrap-server kafka1:19092 \
           --describe --topic "${KAFKA_TOPIC:-load-test}"
     restart: "no"
+    cpu_shares: 128
+    cpus: 0.5
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
 
-  consumer:
-    build: ./consumer
-    depends_on:
-      kafka-init: { condition: service_completed_successfully }
-    environment:
-      KAFKA_BOOTSTRAP_SERVERS: kafka1:9092,kafka2:9094,kafka3:9096
-      KAFKA_TOPIC: ${KAFKA_TOPIC:-load-test}
-      CONSUMER_GROUPS: group-1,group-2,group-3
-      METRICS_PORT: 8002
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  consumer-1:
+    <<: *consumer-common
     ports:
-      - "8002:8002"
-    restart: unless-stopped
-    stop_grace_period: 20s
-    healthcheck:
-      test:
-        [
-          "CMD",
-          "python",
-          "-c",
-          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/metrics', timeout=5)",
-        ]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 20s
+      - "8082:8082"
+
+  consumer-2:
+    <<: *consumer-common
+    ports:
+      - "8083:8082"
+
+  consumer-3:
+    <<: *consumer-common
+    ports:
+      - "8084:8082"
 
   # Продюсер стартует вместе со стендом, но отправку запускает только POST /runs.
   producer:
     build: ./producer
     depends_on:
       kafka-init: { condition: service_completed_successfully }
+      consumer-1: { condition: service_started }
+      consumer-2: { condition: service_started }
+      consumer-3: { condition: service_started }
     environment:
-      KAFKA_BOOTSTRAP_SERVERS: kafka1:9092,kafka2:9094,kafka3:9096
+      KAFKA_BOOTSTRAP_SERVERS: kafka1:19092,kafka2:19092,kafka3:19092
       KAFKA_TOPIC: ${KAFKA_TOPIC:-load-test}
       TOTAL_MESSAGES: ${TOTAL_MESSAGES:-100000}
       HTTP_PORT: 8001
@@ -154,6 +191,12 @@ services:
     restart: unless-stopped
     # Время на flush() при остановке во время прогона (PRODUCER_FLUSH_TIMEOUT_S = 30 с).
     stop_grace_period: 90s
+    cpu_shares: 1024
+    cpus: 0.5
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
     healthcheck:
       test:
         [
@@ -175,10 +218,16 @@ services:
       kafka3: { condition: service_healthy }
     environment:
       KAFKA_CLUSTERS_0_NAME: kafka-stend
-      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka1:9092,kafka2:9094,kafka3:9096
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka1:19092,kafka2:19092,kafka3:19092
     ports:
       - "8080:8080"
     restart: unless-stopped
+    cpu_shares: 256
+    cpus: 0.25
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
 
   # Sidecar: общий network namespace с брокером, JMX на localhost:9999.
   # Один и тот же kafka-jmx-exporter.yml на все три экземпляра.
@@ -191,6 +240,8 @@ services:
       - ./jmx-exporter/kafka-jmx-exporter.yml:/config.yaml:ro
     command: ["7071", "/config.yaml"]
     restart: unless-stopped
+    cpu_shares: 256
+    cpus: 0.15
 
   jmx-exporter-2:
     image: sourcemation/jmx-exporter:1.7.0
@@ -201,6 +252,8 @@ services:
       - ./jmx-exporter/kafka-jmx-exporter.yml:/config.yaml:ro
     command: ["7071", "/config.yaml"]
     restart: unless-stopped
+    cpu_shares: 256
+    cpus: 0.15
 
   jmx-exporter-3:
     image: sourcemation/jmx-exporter:1.7.0
@@ -211,13 +264,15 @@ services:
       - ./jmx-exporter/kafka-jmx-exporter.yml:/config.yaml:ro
     command: ["7071", "/config.yaml"]
     restart: unless-stopped
+    cpu_shares: 256
+    cpus: 0.15
 
   kafka-exporter:
     image: danielqsj/kafka-exporter:v1.10.0
     command:
-      - --kafka.server=kafka1:9092
-      - --kafka.server=kafka2:9094
-      - --kafka.server=kafka3:9096
+      - --kafka.server=kafka1:19092
+      - --kafka.server=kafka2:19092
+      - --kafka.server=kafka3:19092
       - --kafka.version=4.0.0
       - --offset.show-all
     ports:
@@ -225,6 +280,12 @@ services:
     depends_on:
       kafka-init: { condition: service_completed_successfully }
     restart: unless-stopped
+    cpu_shares: 512
+    cpus: 0.25
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
 
   prometheus:
     image: prom/prometheus:v2.55.1
@@ -242,8 +303,16 @@ services:
       jmx-exporter-3: { condition: service_started }
       kafka-exporter: { condition: service_started }
       producer: { condition: service_healthy }
-      consumer: { condition: service_healthy }
+      consumer-1: { condition: service_healthy }
+      consumer-2: { condition: service_healthy }
+      consumer-3: { condition: service_healthy }
     restart: unless-stopped
+    cpu_shares: 512
+    cpus: 0.3
+    deploy:
+      resources:
+        limits:
+          cpus: "0.3"
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/-/ready"]
       interval: 15s
@@ -259,14 +328,22 @@ services:
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/provisioning/dashboards/kafka-stend.json
     volumes:
       - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
       - grafana:/var/lib/grafana
     ports:
       - "3000:3000"
     depends_on:
       prometheus: { condition: service_healthy }
     restart: unless-stopped
+    cpu_shares: 256
+    cpus: 0.2
+    deploy:
+      resources:
+        limits:
+          cpus: "0.2"
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/api/health"]
       interval: 15s

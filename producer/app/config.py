@@ -65,7 +65,7 @@ class Settings:
     @classmethod
     def from_env(cls) -> Settings:
         return cls(
-            bootstrap_servers=_env_str("KAFKA_BOOTSTRAP_SERVERS", "kafka1:9092,kafka2:9094,kafka3:9096"),
+            bootstrap_servers=_env_str("KAFKA_BOOTSTRAP_SERVERS", "kafka1:19092,kafka2:19092,kafka3:19092"),
             topic=_env_str("KAFKA_TOPIC", "load-test"),
             total_messages=_env_int("TOTAL_MESSAGES", 100_000),
             http_port=_env_int("HTTP_PORT", 8001),

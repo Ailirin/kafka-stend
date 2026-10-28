@@ -12,5 +12,5 @@ COPY app/ ./app/
 RUN chown -R appuser:appuser /app
 USER appuser
 
-EXPOSE 8002
+EXPOSE 8082
 CMD ["python", "-m", "app.main"]
