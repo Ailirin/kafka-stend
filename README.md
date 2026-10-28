@@ -1,10 +1,12 @@
 # Нагрузочный стенд Kafka
 
-Воспроизводимые прогоны Apache Kafka 4.1.0 (KRaft) на одной машине: кластер из трёх узлов с ролями broker+controller, продюсер и три независимые consumer group на `confluent-kafka` 2.16.0, снятие метрик в Prometheus и Grafana.
+Инфраструктурный стенд команды: безопасно проверять гипотезы по комбинациям настроек продюсера, брокера и консьюмера **до выката в бой**, а не экспериментировать на боевом кластере.
 
-Прогон стартует по `POST /runs`, параметры — переменными окружения. Критерий успеха: `delivered == total_messages`, `failed == 0`, `not_flushed == 0`, лаг трёх групп после догонки — 0. Один изменяемый параметр за прогон, результат — строка в таблице экспериментов.
+На одной машине поднимается Apache Kafka 4.1.0 (KRaft): три узла broker+controller, продюсер и три реплики консьюмера в одной group `load-test-group` (6 партиций делятся между членами) на `confluent-kafka` 2.16.0, метрики в Prometheus и Grafana. Один прогон — один изменяемый параметр; результат сравнивают по throughput, p99 и лагу группы.
 
-Брокеры ограничены по CPU и памяти, чтобы цифры отражали железо стенда, а не «сколько влезло в ноут без лимитов».
+Прогон стартует по `POST /runs`, параметры — переменными окружения. Критерий успеха: `delivered == total_messages`, `failed == 0`, `not_flushed == 0`, лаг `load-test-group` после догонки — 0.
+
+Брокеры ограничены по CPU и памяти, чтобы цифры были воспроизводимы на этом железе.
 
 ## Состав
 
@@ -13,16 +15,16 @@
 | kafka1 / kafka2 / kafka3 | Кластер, 3 брокера, роли broker+controller | внутри Docker |
 | kafka-init | Создаёт топик `load-test` (6 партиций, RF=3) и завершается | — |
 | producer | HTTP API, отправка по команде | http://localhost:8001/docs, liveness `/health` |
-| consumer | Три группы в одном процессе (`group-1` … `group-3`) | http://localhost:8002/metrics |
+| consumer-1/2/3 | Три члена group `load-test-group` | http://localhost:8082/metrics … :8084 |
 | kafka-ui | Топики, партиции, consumer groups | http://localhost:8080 |
 | jmx-exporter-1/2/3 | JMX брокера, sidecar в сети `kafkaN` | scrape `kafkaN:7071` |
 | kafka-exporter | Лаг consumer groups | http://localhost:9308/metrics |
 | prometheus | Хранение метрик 7 дней | http://localhost:9090 |
 | grafana | Графики, datasource Prometheus уже прописан | http://localhost:3000 (пароль: `GRAFANA_ADMIN_PASSWORD`, дефолт `admin`) |
 
-Порты брокеров наружу не проброшены: advertised-адреса — Docker-имена `kafka1:9092`, `kafka2:9094`, `kafka3:9096`. Клиенты работают только внутри сети Compose.
+Клиенты внутри Compose ходят на **INTERNAL** `kafka1:19092,kafka2:19092,kafka3:19092`. Listener EXTERNAL (`localhost:9092/9094/9096`) объявлен, порты на хост не проброшены.
 
-У каждого брокера heap 512m, лимит контейнера 768m и одно логическое ядро (`cpuset` 0 / 1 / 2). Healthcheck брокера раз в 60 с. Prometheus scrape: 5 с для клиентов, 30 с для JMX.
+Бюджет Docker Desktop — **4 ядра**. У каждого брокера heap 512m, память 768m, потолок **1.0 CPU**. Продюсер 0.5 CPU, три консьюмера по 0.25. Нужен `docker compose` v2. Healthcheck брокера — INTERNAL `:19092`, раз в 60 с. Prometheus scrape: 5 с для клиентов, 30 с для JMX.
 
 ## Запуск
 
@@ -35,7 +37,7 @@ docker compose ps
 
 Ожидаемое состояние:
 
-- `kafka1`–`kafka3`, `producer`, `consumer` — `healthy`
+- `kafka1`–`kafka3`, `producer`, `consumer-1`–`3` — `healthy`
 - `kafka-init` — `Exited (0)`
 - `kafka-ui`, `jmx-exporter-1`–`3`, `kafka-exporter`, `prometheus`, `grafana` — `Up`
 
@@ -47,11 +49,11 @@ docker compose logs kafka-init
 
 В логе: `PartitionCount: 6`, `ReplicationFactor: 3`.
 
-Консьюмеры стартуют вместе со стендом. Три группы в `Stable` и все 6 партиций у каждой:
+Консьюмеры стартуют вместе со стендом. Одна group `load-test-group`, три члена, 6 партиций поделены (по две на члена):
 
 ```powershell
-docker compose logs consumer
-docker compose exec kafka1 /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server kafka1:9092 --describe --group group-1
+docker compose logs consumer-1
+docker compose exec kafka1 /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server kafka1:19092 --describe --group load-test-group
 ```
 
 Продюсер после старта **ничего не отправляет**. Он ждёт HTTP-команды.
@@ -101,27 +103,21 @@ docker volume rm kafka-stend_kafka1-data kafka-stend_kafka2-data kafka-stend_kaf
 docker compose up -d
 ```
 
-История Prometheus и дашборды Grafana при этом остаются. Полный сброс всех томов: `docker compose down -v`.
+История Prometheus при этом остаётся. Дашборд Grafana читается из `grafana/provisioning/dashboards/` при старте. Полный сброс всех томов: `docker compose down -v`.
 
 ## Grafana
 
-Источник Prometheus уже прописан при старте контейнера. Дашборд **Kafka Dashboard** сохранён в томе Grafana.
+Источник Prometheus и дашборд **Kafka Stend** подключаются при старте контейнера (provisioning). Правки в UI перезапишутся при следующем старте Grafana — менять JSON в `grafana/provisioning/dashboards/`.
 
 ### 1. Открыть дашборд
 
-Адрес: http://localhost:3000/d/i8HLvrkiz/kafka-dashboard
+Адрес: http://localhost:3000/d/kafka-stend/kafka-stend
 
 Анонимный просмотр включён. Чтобы править дашборды, войдите: **Sign in** → `admin` / `admin`. Пароль можно не менять (Skip).
 
-Сверху выставьте фильтры:
+Фильтры сверху: **Topic** = `load-test`, **Group** = `load-test-group`. Диапазон **Last 15 minutes**, обновление **5s**.
 
-- **kafka_job_name** — `kafka-jmx`
-- **Broker** — All
-- **Topic** — `load-test` или All
-
-Диапазон **Last 15 minutes**, обновление **5s**.
-
-Если страница не открывается: `docker compose ps grafana` должен быть `Up`.
+Если страница не открывается: `docker compose ps grafana` должен быть `Up`. После смены JSON: `docker compose restart grafana`.
 
 ### 2. Проверить источник данных
 
@@ -143,32 +139,30 @@ up
 
 ### 4. Запросы дашборда
 
-Готовые дашборды с grafana.com (ID `7589`, `18228`) ждут другие имена метрик и будут пустыми. На **Kafka Dashboard** уже стоят запросы стенда.
+Готовые дашборды с grafana.com (ID `7589`, `18228`) ждут другие имена метрик и будут пустыми. **Kafka Stend** использует имена этого стенда.
 
 | Панель | PromQL | Заметка |
 | --- | --- | --- |
 | Messages in | `sum(kafka_server_brokertopicmetrics_messagesinpersec_oneminuterate{topic="load-test"})` | скорость записи на брокерах |
 | Bytes in | `sum(kafka_server_brokertopicmetrics_bytesinpersec_oneminuterate{topic="load-test"})` | входящий трафик |
 | Bytes out | `sum(kafka_server_brokertopicmetrics_bytesoutpersec_oneminuterate{topic="load-test"})` | исходящий трафик |
-| Consumer lag | `sum(kafka_consumergroup_lag{topic="load-test"}) by (consumergroup)` | появится после первого прогона |
-| Producer rate | `rate(producer_messages_sent_total[1m])` | подтверждённые отправки |
-| Consumer rate | `sum(rate(consumer_messages_consumed_total[1m])) by (group_id)` | чтение по группам |
-| p99 latency | `histogram_quantile(0.99, rate(producer_send_latency_seconds_bucket[1m]))` | задержка produce → callback |
-| Broker CPU | `jmx_operatingsystem_processcpuload{job="kafka-jmx"}` | загрузка JVM брокера |
+| Consumer lag | `sum(kafka_consumergroup_lag{consumergroup="load-test-group",topic="load-test"})` | появится после первого прогона |
+| Producer rate | `sum(rate(producer_messages_acked_total[1m]))` | подтверждённые отправки |
+| Consumer rate | `sum(rate(consumer_messages_consumed_total{group_id="load-test-group"}[1m]))` | сумма трёх членов группы |
+| p99 latency | `histogram_quantile(0.99, sum(rate(producer_send_latency_seconds_bucket[1m])) by (le))` | задержка produce → callback |
+| Broker CPU | `jmx_operatingsystem_processcpuload{job="kafka-jmx"} * 100` | загрузка JVM брокера |
 | Broker heap | `jmx_memory_heap_used{job="kafka-jmx"}` | занятая память JVM |
 | Broker GC time | `rate(jmx_gc_collectiontime{job="kafka-jmx"}[1m])` | время сборок мусора |
 | Produce request p99 | `kafka_network_requestmetrics_totaltimems_99thpercentile{job="kafka-jmx",request="Produce"}` | время запроса Produce на брокере |
 | Producer buffer full | `rate(producer_buffer_full_total[1m])` | `produce()` упёрся в локальную очередь |
 
-`OneMinuteRate` из JMX — уже скорость, её нельзя оборачивать в `rate()`. Имена JMX в lowercase: `messagesinpersec`, не `MessagesInPerSec`.
-
-Панели ZooKeeper на дашборде пустые: кластер на KRaft.
+`OneMinuteRate` из JMX — уже скорость, её нельзя оборачивать в `rate()`. Имена JMX в lowercase: `messagesinpersec`, не `MessagesInPerSec`. Ряды JMX с `topic="load-test"` появляются после первого трафика в топик.
 
 ### 5. Снять цифры прогона
 
 1. Запустите прогон: `Invoke-RestMethod -Method Post http://localhost:8001/runs`.
 2. Смотрите Messages in и Producer rate — должны расти вместе.
-3. Lag по группам может вырасти во время отправки и должен перестать расти линейно после неё.
+3. Лаг `load-test-group` может вырасти во время отправки и должен перестать расти линейно после неё.
 4. Строка таблицы: `rate` и `elapsed_s` из `GET /runs/current`, p99 и пик лага — из Prometheus за окно прогона. Короткий прогон (~3–5 с) на графике JMX легко промахнуть.
 
 ## Эксперименты
@@ -223,7 +217,7 @@ docker compose up -d
 - Слушатели PLAINTEXT, без TLS, SASL и ACL: брокеры не опубликованы на хост, клиенты только в сети Compose. Для публичного контура этого недостаточно.
 - Полезная нагрузка — короткие текстовые сообщения, один процесс продюсера.
 - Логи брокеров, Prometheus и Grafana — в именованных томах. `docker compose down` контейнеры останавливает, данные оставляет.
-- Стенд для измерений и регрессии настроек продюсера на изолированной сети Docker.
+- Стенд для гипотез внутри команды на изолированной сети Docker, не замена боевого кластера и не место для обкатки TLS/ACL.
 
 ## Остановка
 

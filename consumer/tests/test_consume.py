@@ -64,7 +64,7 @@ def _settings(batch_size: int = 1000) -> Settings:
     return Settings(
         bootstrap_servers="localhost:9092",
         topic=TOPIC,
-        group_ids=("group-1",),
+        group_id="load-test-group",
         metrics_port=0,
         poll_timeout_s=0.01,
         shutdown_timeout_s=1,
@@ -79,7 +79,7 @@ def _settings(batch_size: int = 1000) -> Settings:
 
 def _worker(handler=None, batch_size: int = 1000, stop: threading.Event | None = None) -> ConsumerWorker:
     return ConsumerWorker(
-        "group-1",
+        "load-test-group",
         _settings(batch_size),
         stop or threading.Event(),
         handler=handler,
@@ -180,7 +180,7 @@ def test_on_revoke_commits_processed_prefix() -> None:
 
 
 def test_auto_commit_is_disabled() -> None:
-    config = _settings().kafka_config("group-1")
+    config = _settings().kafka_config()
     assert config["enable.auto.commit"] is False
     assert config["enable.auto.offset.store"] is False
     assert config["max.poll.interval.ms"] == 300_000
@@ -188,5 +188,5 @@ def test_auto_commit_is_disabled() -> None:
 
 
 def test_kafka_config_has_no_message_count() -> None:
-    assert "message_count" not in _settings().kafka_config("group-1")
+    assert "message_count" not in _settings().kafka_config()
     assert not hasattr(_settings(), "total_messages")
